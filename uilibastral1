@@ -497,6 +497,16 @@ end
 
 function Library:SetColor(key, color)
     Theme[key] = color
+
+    -- Special handling: Background drives the container Gradient
+    if key == "Background" then
+        Theme.Gradient = ColorSequence.new{
+            ColorSequenceKeypoint.new(0.00, color:Lerp(Color3.fromRGB(255,255,255), 0.35)),
+            ColorSequenceKeypoint.new(0.34, color),
+            ColorSequenceKeypoint.new(1.00, color:Lerp(Color3.fromRGB(0,0,0), 0.65))
+        }
+    end
+
     Library:ApplyTheme()
     Library._config._flags['Theme_'..key] = self:rgbToHex(color)
     Config:save(game.GameId, Library._config)
