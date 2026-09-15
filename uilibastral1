@@ -1,21 +1,17 @@
 -- ═══════════════════════════════════════════════════════════════
---  Astral UI — merged lib (Fixed Build v2)
+--  Astral UI — merged lib (Fixed Build v3)
 --  Base: Fallen
 --  Overlays: IceLib (FPS/Ping) + IceLib-style Keybind List
 --
 --  Fixes in this build:
---   * Minimize no longer resets background colour/gradient
---   * Minimized icon preserves custom logo (no default revert)
---   * Config rewrites on every toggle/change (not just first time)
---   * Toggles recolour in real time from Appearance tab
---   * Toggle colour exposed as Appearance target ("Toggle")
---   * Input boxes restyled — half-dark transparent w/ soft purple tint
---   * Keybind list rebuilt with IceLib dark style (no flash)
---   * Library.new({ name, logo, namespace })
---   * Library.SetBackgroundPresets({...})
---   * Background presets saveable/deletable from UI (persist to workspace)
---   * Minimize keybind gated on module state (disabled = no keybind)
---   * Sub-bind gated on module state
+--   * Central ApplyTheme() — every appearance change updates live
+--   * Minimize/unminimize NEVER touches theme elements
+--   * Custom logo preserved across minimize (cached resolve)
+--   * Live recolour for: toggles, checkboxes, keybind boxes, inputs,
+--     buttons, dividers, strokes, gradients, tab gradients
+--   * Config rewrites fully on every change
+--   * Background presets save/delete from UI
+--   * Minimize keybind gated on module state
 -- ═══════════════════════════════════════════════════════════════
 
 local UserInputService = cloneref and cloneref(game:GetService('UserInputService')) or game:GetService('UserInputService')
@@ -203,15 +199,16 @@ local Library = {
 
     _clientName = "Xinve",
     _clientLogo = "rbxassetid://119051552929078",
-    _resolvedLogo = nil,  -- cached resolved logo path
+    _resolvedLogo = nil,
 
     _backgroundPresets = {},
     _presetOptions = { 'None' },
 
-    -- Live recolour registries
-    _toggleLive = {},
-    _inputLive  = {},
-    _moduleLive = {},
+    -- UI references for live update
+    _refs = {},
+
+    -- Live update registries
+    _liveUpdaters = {},  -- list of functions called on SetColor
 }
 Library.__index = Library
 Library.Connections = Connections
@@ -281,7 +278,6 @@ function Library.new(opts)
 
     Library._clientName = name
     Library._clientLogo = logo
-    -- Pre-resolve the logo once so minimize/unminimize doesn't re-fetch
     Library._resolvedLogo = resolve_image(logo, NAMESPACE..'/Icons')
     Library._config = Config:load(game.GameId, { _flags = {}, _keybinds = {} })
     Library.LoadBackgroundPresets()
@@ -345,7 +341,6 @@ function Library.SendNotification(settings)
     InnerFrame.Name = "InnerFrame"
     InnerFrame.ZIndex = 1
     InnerFrame.Parent = Notification
-    table.insert(Library._elements, {obj = InnerFrame, prop = "BackgroundColor3", tKey = "Group"})
 
     local InnerGradient = Instance.new("UIGradient")
     InnerGradient.Color = Theme.Gradient
@@ -362,7 +357,6 @@ function Library.SendNotification(settings)
     InnerStroke.Thickness = 1
     InnerStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
     InnerStroke.Parent = InnerFrame
-    table.insert(Library._elements, {obj = InnerStroke, prop = "Color", tKey = "GroupStroke"})
 
     local Title = Instance.new("TextLabel")
     Title.Text = settings.title or "Notification"
@@ -377,7 +371,6 @@ function Library.SendNotification(settings)
     Title.TextTruncate = Enum.TextTruncate.AtEnd
     Title.ZIndex = 2
     Title.Parent = InnerFrame
-    table.insert(Library._elements, {obj = Title, prop = "TextColor3", tKey = "Text"})
 
     local Body = Instance.new("TextLabel")
     Body.Text = settings.text or "Notification message"
@@ -392,7 +385,6 @@ function Library.SendNotification(settings)
     Body.TextTruncate = Enum.TextTruncate.AtEnd
     Body.ZIndex = 2
     Body.Parent = InnerFrame
-    table.insert(Library._elements, {obj = Body, prop = "TextColor3", tKey = "TextDim"})
 
     task.spawn(function()
         TweenService:Create(InnerFrame, TweenInfo.new(0.32, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
@@ -451,18 +443,77 @@ function Library:rgbToHex(color)
     return string.format("#%02X%02X%02X", math.floor(color.R * 255), math.floor(color.G * 255), math.floor(color.B * 255))
 end
 
--- Central flag write + save — always rewrites the full config
-function Library:setFlag(flag, value)
-    Library._config._flags[flag] = value
+-- ═══════════════════════════════════════════════════════════════
+--  ApplyTheme — the master live-update function
+--  Called whenever a colour changes. Reapplies EVERYTHING
+--  from Theme so all elements reflect the new colours instantly.
+-- ═══════════════════════════════════════════════════════════════
+function Library:ApplyTheme()
+    -- 1. Reapply every registered element
+    for _, element in ipairs(Library._elements) do
+        if element.stateKey ~= nil then
+            -- skip — handled by module state callbacks
+        else
+            pcall(function()
+                element.obj[element.prop] = Theme[element.tKey]
+            end)
+        end
+    end
+
+    -- 2. Container-level items (not in _elements)
+    local refs = Library._refs
+    if refs.ContainerGradient then
+        refs.ContainerGradient.Color = Theme.Gradient
+    end
+    if refs.SideGradient then
+        refs.SideGradient.Color = Theme.Gradient
+    end
+    if refs.UIStroke then
+        refs.UIStroke.Color = Theme.GroupStroke
+    end
+
+    -- 3. Live toggles (module toggle + knob)
+    for _, entry in ipairs(Library._moduleLive) do
+        local m = entry.module
+        if m and m._state then
+            if entry.toggle then entry.toggle.BackgroundColor3 = Theme.Toggle end
+            if entry.knob then entry.knob.BackgroundColor3 = Theme.Group end
+        else
+            if entry.toggle then entry.toggle.BackgroundColor3 = Theme.Control end
+            if entry.knob then entry.knob.BackgroundColor3 = Theme.TextDim end
+        end
+    end
+
+    -- 4. Live checkboxes
+    for _, entry in ipairs(Library._checkboxLive or {}) do
+        if entry.state then
+            if entry.fill then entry.fill.BackgroundColor3 = Theme.Toggle end
+            if entry.box then entry.box.BackgroundColor3 = Theme.Control end
+        else
+            if entry.fill then entry.fill.BackgroundColor3 = Theme.Toggle end
+            if entry.box then entry.box.BackgroundColor3 = Theme.Control end
+        end
+    end
+
+    -- 5. Custom per-element live updaters (registered by features)
+    for _, fn in ipairs(Library._liveUpdaters) do
+        pcall(fn, Theme)
+    end
+end
+
+function Library:SetColor(key, color)
+    Theme[key] = color
+    Library:ApplyTheme()
+    Library._config._flags['Theme_'..key] = self:rgbToHex(color)
     Config:save(game.GameId, Library._config)
 end
 
-function Library:setKeybind(flag, value)
-    if value == nil then
-        Library._config._keybinds[flag] = nil
-    else
-        Library._config._keybinds[flag] = value
-    end
+function Library:GetColor(key)
+    return Theme[key]
+end
+
+function Library:setFlag(flag, value)
+    Library._config._flags[flag] = value
     Config:save(game.GameId, Library._config)
 end
 
@@ -646,7 +697,6 @@ function Library:create_ui()
     ClientName.Parent = Handler
     table.insert(Library._elements, {obj = ClientName, prop = "TextColor3", tKey = "Text"})
 
-    -- Logo uses the PRE-RESOLVED custom image (cached)
     local Logo = Instance.new('ImageLabel')
     Logo.Name = 'Logo'
     Logo.Size = UDim2.new(0, 26, 0, 26)
@@ -720,6 +770,17 @@ function Library:create_ui()
     self._container = Container
     self._background = Background
 
+    -- Store refs for ApplyTheme
+    Library._refs = {
+        ContainerGradient = ContainerGradient,
+        SideGradient = SideGradient,
+        UIStroke = UIStroke,
+        Container = Container,
+        Background = Background,
+        Logo = Logo,
+        Handler = Handler,
+    }
+
     local function on_drag(input, process)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             self._dragging = true
@@ -755,45 +816,23 @@ function Library:create_ui()
     end)
 
     -- ═══════════════════════════════════════════════════════════
-    --  change_visiblity — FIXED
-    --   * No longer hardcodes gradient colors
-    --   * Uses current Theme.Gradient so custom colors persist
-    --   * Keeps custom logo (no default revert)
+    --  change_visiblity — DOES NOT TOUCH THEME
+    --  Only modifies Size (and logo/client positions which are
+    --  layout, not theme). Theme is fully handled by ApplyTheme.
     -- ═══════════════════════════════════════════════════════════
     function self:change_visiblity(state)
         Library._ui_open = state
         ShadowHolder.Visible = state
+
         if state then
-            -- Unminimize: restore full gradient + logo/text positions
-            ContainerGradient.Enabled = true
-            ContainerGradient.Color = Theme.Gradient
-            ContainerGradient.Rotation = 90
-            Container.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-
-            -- Restore background image if it was set
-            Background.Visible = (Library._config._flags['Background_Image'] == true) and true or Background.Visible
-            Background.ImageTransparency = (Library._config._flags['Background_Transparency'] or 0.5)
-
             Logo.Position = UDim2.new(0, 14, 0, 26)
-            Logo.Image = Library._resolvedLogo or resolve_image(Library._clientLogo, NAMESPACE..'/Icons')
-            Logo.ImageColor3 = Color3.fromRGB(255, 255, 255)
             ClientName.Position = UDim2.new(0, 43, 0, 26)
-
             TweenService:Create(Container, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
                 Size = UDim2.fromOffset(752, 479)
             }):Play()
         else
-            -- Minimize: KEEP the same gradient/theme, just shrink
-            ContainerGradient.Enabled = true
-            ContainerGradient.Color = Theme.Gradient
-            ContainerGradient.Rotation = 90
-            Container.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-
             Logo.Position = UDim2.new(0, 10, 0, 26)
-            Logo.Image = Library._resolvedLogo or resolve_image(Library._clientLogo, NAMESPACE..'/Icons')
-            Logo.ImageColor3 = Color3.fromRGB(255, 255, 255)
             ClientName.Position = UDim2.new(0, 39, 0, 26)
-
             TweenService:Create(Container, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
                 Size = UDim2.fromOffset(104.5, 52)
             }):Play()
@@ -1069,13 +1108,13 @@ function Library:create_ui()
             UICorner.CornerRadius = UDim.new(0, 9)
             UICorner.Parent = Module
 
-            local UIStroke = Instance.new('UIStroke')
-            UIStroke.Color = Theme.GroupStroke
-            UIStroke.Transparency = 0.72
-            UIStroke.Thickness = 1
-            UIStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-            UIStroke.Parent = Module
-            table.insert(Library._elements, {obj = UIStroke, prop = "Color", tKey = "GroupStroke"})
+            local ModuleStroke = Instance.new('UIStroke')
+            ModuleStroke.Color = Theme.GroupStroke
+            ModuleStroke.Transparency = 0.72
+            ModuleStroke.Thickness = 1
+            ModuleStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+            ModuleStroke.Parent = Module
+            table.insert(Library._elements, {obj = ModuleStroke, prop = "Color", tKey = "GroupStroke"})
 
             local Header = Instance.new('TextButton')
             Header.FontFace = FONT_MAIN
@@ -1151,7 +1190,6 @@ function Library:create_ui()
             Toggle.BorderSizePixel = 0
             Toggle.BackgroundColor3 = Theme.Control
             Toggle.Parent = Header
-            table.insert(Library._elements, {obj = Toggle, prop = "BackgroundColor3", tKey = "Control", stateKey = false})
 
             local ToggleCorner = Instance.new('UICorner')
             ToggleCorner.CornerRadius = UDim.new(1, 0)
@@ -1166,7 +1204,6 @@ function Library:create_ui()
             Circle.BorderSizePixel = 0
             Circle.BackgroundColor3 = Theme.TextDim
             Circle.Parent = Toggle
-            table.insert(Library._elements, {obj = Circle, prop = "BackgroundColor3", tKey = "TextDim", stateKey = false})
 
             local CircleCorner = Instance.new('UICorner')
             CircleCorner.CornerRadius = UDim.new(1, 0)
@@ -1271,20 +1308,6 @@ function Library:create_ui()
             UIListLayout_Opts.SortOrder = Enum.SortOrder.LayoutOrder
             UIListLayout_Opts.Parent = Options
 
-            local function applyToggleColour()
-                if ModuleManager._state then
-                    Toggle.BackgroundColor3 = Theme.Toggle
-                    Circle.BackgroundColor3 = Theme.Group
-                else
-                    Toggle.BackgroundColor3 = Theme.Control
-                    Circle.BackgroundColor3 = Theme.TextDim
-                end
-            end
-            ModuleManager._applyToggleColour = applyToggleColour
-
-            -- ═══════════════════════════════════════════════════════
-            --  change_state — ALWAYS writes full config
-            -- ═══════════════════════════════════════════════════════
             function ModuleManager:change_state(state)
                 self._state = state
 
@@ -1292,27 +1315,23 @@ function Library:create_ui()
                     TweenService:Create(Module, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
                         Size = UDim2.fromOffset(241, 93 + self._size + self._multiplier)
                     }):Play()
-                    TweenService:Create(Toggle, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
-                        BackgroundColor3 = Theme.Toggle
-                    }):Play()
-                    TweenService:Create(Circle, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
-                        BackgroundColor3 = Theme.Group,
-                        Position = UDim2.new(1, -14, 0.5, 0)
-                    }):Play()
                 else
                     TweenService:Create(Module, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
                         Size = UDim2.fromOffset(241, 93)
                     }):Play()
-                    TweenService:Create(Toggle, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
-                        BackgroundColor3 = Theme.Control
-                    }):Play()
-                    TweenService:Create(Circle, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
-                        BackgroundColor3 = Theme.TextDim,
-                        Position = UDim2.new(0, 2, 0.5, 0)
-                    }):Play()
                 end
 
-                -- Always write full config to disk
+                -- Update toggle visuals directly (not via tween, ApplyTheme handles colours)
+                if self._state then
+                    Toggle.BackgroundColor3 = Theme.Toggle
+                    Circle.BackgroundColor3 = Theme.Group
+                    Circle.Position = UDim2.new(1, -14, 0.5, 0)
+                else
+                    Toggle.BackgroundColor3 = Theme.Control
+                    Circle.BackgroundColor3 = Theme.TextDim
+                    Circle.Position = UDim2.new(0, 2, 0.5, 0)
+                end
+
                 Library._config._flags[settings.flag] = self._state
                 if settings.callback then settings.callback(self._state) end
                 Config:save(game.GameId, Library._config)
@@ -1446,6 +1465,9 @@ function Library:create_ui()
                 ModuleManager:change_state(not ModuleManager._state)
             end)
 
+            -- ═══════════════════════════════════════════════════
+            --  create_checkbox — live recolour registered
+            -- ═══════════════════════════════════════════════════
             function ModuleManager:create_checkbox(s)
                 LayoutOrderModule = LayoutOrderModule + 1
                 local CheckboxManager = { _state = false }
@@ -1493,7 +1515,7 @@ function Library:create_ui()
                 KeybindBox.Size = UDim2.fromOffset(14, 14)
                 KeybindBox.Position = UDim2.new(1, -35, 0.5, 0)
                 KeybindBox.AnchorPoint = Vector2.new(0, 0.5)
-                KeybindBox.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+                KeybindBox.BackgroundColor3 = Theme.Control
                 KeybindBox.BorderSizePixel = 0
                 KeybindBox.AutoButtonColor = false
                 KeybindBox.Text = ''
@@ -1508,7 +1530,7 @@ function Library:create_ui()
                 KeybindLabel.Name = "KeybindLabel"
                 KeybindLabel.Size = UDim2.new(1, 0, 1, 0)
                 KeybindLabel.BackgroundTransparency = 1
-                KeybindLabel.TextColor3 = Color3.fromRGB(0, 0, 0)
+                KeybindLabel.TextColor3 = Theme.Text
                 KeybindLabel.TextSize = 10
                 KeybindLabel.Font = Enum.Font.SourceSans
                 KeybindLabel.Text = Library._config._keybinds[s.flag]
@@ -1525,7 +1547,7 @@ function Library:create_ui()
                 Box.Name = "Box"
                 Box.Size = UDim2.new(0, 15, 0, 15)
                 Box.BorderSizePixel = 0
-                Box.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+                Box.BackgroundColor3 = Theme.Control
                 Box.Parent = Checkbox
                 table.insert(Library._elements, {obj = Box, prop = "BackgroundColor3", tKey = "Control"})
 
@@ -1549,6 +1571,12 @@ function Library:create_ui()
                 FillCorner.CornerRadius = UDim.new(0, 3)
                 FillCorner.Parent = Fill
 
+                -- Register in checkbox live list (for state-based recolour)
+                Library._checkboxLive = Library._checkboxLive or {}
+                table.insert(Library._checkboxLive, {
+                    fill = Fill, box = Box, state = false
+                })
+
                 function CheckboxManager:change_state(state)
                     self._state = state
                     if self._state then
@@ -1568,7 +1596,6 @@ function Library:create_ui()
                             BackgroundColor3 = Theme.Toggle
                         }):Play()
                     end
-                    -- Always rewrite full config
                     Library._config._flags[s.flag] = self._state
                     if s.callback then s.callback(self._state) end
                     Config:save(game.GameId, Library._config)
@@ -1594,7 +1621,7 @@ function Library:create_ui()
 
                     local function cancel_choose()
                         Library._choosing_keybind = false
-                        KeybindBox.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+                        KeybindBox.BackgroundColor3 = Theme.Control
                         if Library._config._keybinds[s.flag] then
                             KeybindLabel.Text = string.gsub(tostring(Library._config._keybinds[s.flag]), "Enum.KeyCode.", "")
                         else
@@ -1864,7 +1891,7 @@ function Library:create_ui()
                 Drag.Name = 'Drag'
                 Drag.Size = UDim2.new(0, 207, 0, 4)
                 Drag.BorderSizePixel = 0
-                Drag.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+                Drag.BackgroundColor3 = Theme.Group
                 Drag.Parent = Slider
                 table.insert(Library._elements, {obj = Drag, prop = "BackgroundColor3", tKey = "Group"})
 
@@ -1880,7 +1907,7 @@ function Library:create_ui()
                 Fill.Name = 'Fill'
                 Fill.Size = UDim2.new(0, 103, 0, 4)
                 Fill.BorderSizePixel = 0
-                Fill.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+                Fill.BackgroundColor3 = Theme.Accent
                 Fill.Parent = Drag
                 table.insert(Library._elements, {obj = Fill, prop = "BackgroundColor3", tKey = "Accent"})
 
@@ -1902,7 +1929,7 @@ function Library:create_ui()
                 Circle.BorderColor3 = Color3.fromRGB(0, 0, 0)
                 Circle.Size = UDim2.new(0, 6, 0, 6)
                 Circle.BorderSizePixel = 0
-                Circle.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+                Circle.BackgroundColor3 = Theme.Accent
                 Circle.Parent = Fill
                 table.insert(Library._elements, {obj = Circle, prop = "BackgroundColor3", tKey = "Accent"})
 
@@ -2527,41 +2554,6 @@ function Library:create_ui()
         return TabManager
     end
 
-    function self:SetColor(key, color)
-        Theme[key] = color
-        for _, element in ipairs(Library._elements) do
-            if element.tKey == key then
-                if element.stateKey ~= nil then
-                    -- skip
-                else
-                    pcall(function() element.obj[element.prop] = color end)
-                end
-            end
-        end
-        if key == "Background" then
-            ContainerGradient.Color = ColorSequence.new(color)
-            SideGradient.Color = ColorSequence.new(color)
-        elseif key == "GroupStroke" then
-            UIStroke.Color = color
-        end
-
-        if key == "Toggle" then
-            for _, entry in ipairs(Library._moduleLive) do
-                if entry.module._state then
-                    if entry.toggle then entry.toggle.BackgroundColor3 = color end
-                    if entry.knob then entry.knob.BackgroundColor3 = Theme.Group end
-                end
-            end
-        end
-
-        Library._config._flags['Theme_'..key] = self:rgbToHex(color)
-        Config:save(game.GameId, Library._config)
-    end
-
-    function self:GetColor(key)
-        return Theme[key]
-    end
-
     -- ═══════════════════════════════════════════════════════════
     --  Interface Tab
     -- ═══════════════════════════════════════════════════════════
@@ -2723,7 +2715,7 @@ function Library:create_ui()
                 if typeof(default) == "Color3" then
                     local saved = Library._config._flags['Theme_'..key]
                     if saved then
-                        self:SetColor(key, self:hexToRGB(saved))
+                        Library:SetColor(key, Library:hexToRGB(saved))
                     end
                 end
             end
@@ -2960,7 +2952,7 @@ function Library:create_ui()
                 if Color_Swatches[Selected_Color_Target] then
                     Color_Swatches[Selected_Color_Target].BackgroundColor3 = color
                 end
-                self:SetColor(Selected_Color_Target, color)
+                Library:SetColor(Selected_Color_Target, color)
             end
 
             local function calibrate_pointer(frame)
@@ -3098,7 +3090,7 @@ function Library:create_ui()
                 close_popup()
                 for target, color in pairs(DefaultTheme) do
                     if typeof(color) == "Color3" then
-                        self:SetColor(target, color)
+                        Library:SetColor(target, color)
                         if Color_Swatches[target] then
                             Color_Swatches[target].BackgroundColor3 = color
                         end
@@ -3943,7 +3935,6 @@ function Library:create_ui()
         getgenv()._Xinve_Cleanup = nil
     end)
 
-    -- Minimize keybind handler — gated on module state
     Connections['library_visiblity'] = UserInputService.InputBegan:Connect(function(input, process)
         if process then return end
         if Library._choosing_keybind then return end
@@ -4007,7 +3998,7 @@ function Library:LoadConfig()
                 if data and data.Theme then
                     for k, v in pairs(data.Theme) do
                         if DefaultTheme[k] then
-                            self:SetColor(k, self:hexToRGB(v))
+                            Library:SetColor(k, Library:hexToRGB(v))
                         end
                     end
                 end
