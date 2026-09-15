@@ -1,10 +1,13 @@
 -- ═══════════════════════════════════════════════════════════════
---  Astral UI — merged lib (Fixed Build)
+--  Astral UI — merged lib (Fixed Build v2)
 --  Base: Fallen
 --  Overlays: IceLib (FPS/Ping) + IceLib-style Keybind List
 --
 --  Fixes in this build:
---   * Toggles recolour in real time from Appearance tab (no re-toggle needed)
+--   * Minimize no longer resets background colour/gradient
+--   * Minimized icon preserves custom logo (no default revert)
+--   * Config rewrites on every toggle/change (not just first time)
+--   * Toggles recolour in real time from Appearance tab
 --   * Toggle colour exposed as Appearance target ("Toggle")
 --   * Input boxes restyled — half-dark transparent w/ soft purple tint
 --   * Keybind list rebuilt with IceLib dark style (no flash)
@@ -200,6 +203,7 @@ local Library = {
 
     _clientName = "Xinve",
     _clientLogo = "rbxassetid://119051552929078",
+    _resolvedLogo = nil,  -- cached resolved logo path
 
     _backgroundPresets = {},
     _presetOptions = { 'None' },
@@ -226,12 +230,10 @@ function Library.SetBackgroundPresets(presets)
     Library._presetOptions = opts
 end
 
--- Save a background preset to disk (workspace-like persistence)
 function Library.SaveBackgroundPreset(name, source)
     if not name or name == '' then return false end
     Library._backgroundPresets[name] = source
     Library.SetBackgroundPresets(Library._backgroundPresets)
-    -- Persist to disk
     local path = NAMESPACE..'/BgPresets/'..name..'.json'
     pcall(function()
         writefile(path, HttpService:JSONEncode({ name = name, source = source }))
@@ -239,7 +241,6 @@ function Library.SaveBackgroundPreset(name, source)
     return true
 end
 
--- Delete a background preset from disk
 function Library.DeleteBackgroundPreset(name)
     if not name or name == '' then return false end
     Library._backgroundPresets[name] = nil
@@ -251,7 +252,6 @@ function Library.DeleteBackgroundPreset(name)
     return true
 end
 
--- Load all saved background presets from disk
 function Library.LoadBackgroundPresets()
     if not isfolder(NAMESPACE..'/BgPresets') then makefolder(NAMESPACE..'/BgPresets') end
     if not listfiles then return end
@@ -281,6 +281,8 @@ function Library.new(opts)
 
     Library._clientName = name
     Library._clientLogo = logo
+    -- Pre-resolve the logo once so minimize/unminimize doesn't re-fetch
+    Library._resolvedLogo = resolve_image(logo, NAMESPACE..'/Icons')
     Library._config = Config:load(game.GameId, { _flags = {}, _keybinds = {} })
     Library.LoadBackgroundPresets()
 
@@ -447,6 +449,21 @@ end
 
 function Library:rgbToHex(color)
     return string.format("#%02X%02X%02X", math.floor(color.R * 255), math.floor(color.G * 255), math.floor(color.B * 255))
+end
+
+-- Central flag write + save — always rewrites the full config
+function Library:setFlag(flag, value)
+    Library._config._flags[flag] = value
+    Config:save(game.GameId, Library._config)
+end
+
+function Library:setKeybind(flag, value)
+    if value == nil then
+        Library._config._keybinds[flag] = nil
+    else
+        Library._config._keybinds[flag] = value
+    end
+    Config:save(game.GameId, Library._config)
 end
 
 function Library:create_ui()
@@ -629,6 +646,7 @@ function Library:create_ui()
     ClientName.Parent = Handler
     table.insert(Library._elements, {obj = ClientName, prop = "TextColor3", tKey = "Text"})
 
+    -- Logo uses the PRE-RESOLVED custom image (cached)
     local Logo = Instance.new('ImageLabel')
     Logo.Name = 'Logo'
     Logo.Size = UDim2.new(0, 26, 0, 26)
@@ -637,7 +655,7 @@ function Library:create_ui()
     Logo.BackgroundTransparency = 1
     Logo.BorderSizePixel = 0
     Logo.BorderColor3 = Color3.fromRGB(0, 0, 0)
-    Logo.Image = resolve_image(Library._clientLogo, NAMESPACE..'/Icons')
+    Logo.Image = Library._resolvedLogo or resolve_image(Library._clientLogo, NAMESPACE..'/Icons')
     Logo.ImageColor3 = Color3.fromRGB(255, 255, 255)
     Logo.ImageTransparency = 0
     Logo.ScaleType = Enum.ScaleType.Fit
@@ -736,29 +754,44 @@ function Library:create_ui()
         Connections:disconnect_all()
     end)
 
+    -- ═══════════════════════════════════════════════════════════
+    --  change_visiblity — FIXED
+    --   * No longer hardcodes gradient colors
+    --   * Uses current Theme.Gradient so custom colors persist
+    --   * Keeps custom logo (no default revert)
+    -- ═══════════════════════════════════════════════════════════
     function self:change_visiblity(state)
         Library._ui_open = state
         ShadowHolder.Visible = state
         if state then
+            -- Unminimize: restore full gradient + logo/text positions
             ContainerGradient.Enabled = true
             ContainerGradient.Color = Theme.Gradient
             ContainerGradient.Rotation = 90
             Container.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+
+            -- Restore background image if it was set
+            Background.Visible = (Library._config._flags['Background_Image'] == true) and true or Background.Visible
+            Background.ImageTransparency = (Library._config._flags['Background_Transparency'] or 0.5)
+
             Logo.Position = UDim2.new(0, 14, 0, 26)
+            Logo.Image = Library._resolvedLogo or resolve_image(Library._clientLogo, NAMESPACE..'/Icons')
+            Logo.ImageColor3 = Color3.fromRGB(255, 255, 255)
             ClientName.Position = UDim2.new(0, 43, 0, 26)
 
             TweenService:Create(Container, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
                 Size = UDim2.fromOffset(752, 479)
             }):Play()
         else
+            -- Minimize: KEEP the same gradient/theme, just shrink
             ContainerGradient.Enabled = true
-            ContainerGradient.Color = ColorSequence.new{
-                ColorSequenceKeypoint.new(0.00, Color3.fromRGB(72, 72, 78)),
-                ColorSequenceKeypoint.new(1.00, Color3.fromRGB(0, 0, 0))
-            }
+            ContainerGradient.Color = Theme.Gradient
             ContainerGradient.Rotation = 90
             Container.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+
             Logo.Position = UDim2.new(0, 10, 0, 26)
+            Logo.Image = Library._resolvedLogo or resolve_image(Library._clientLogo, NAMESPACE..'/Icons')
+            Logo.ImageColor3 = Color3.fromRGB(255, 255, 255)
             ClientName.Position = UDim2.new(0, 39, 0, 26)
 
             TweenService:Create(Container, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
@@ -1139,7 +1172,6 @@ function Library:create_ui()
             CircleCorner.CornerRadius = UDim.new(1, 0)
             CircleCorner.Parent = Circle
 
-            -- Register for live toggle recolour
             table.insert(Library._moduleLive, { toggle = Toggle, knob = Circle, module = ModuleManager })
 
             local Icon = Instance.new('ImageLabel')
@@ -1239,7 +1271,6 @@ function Library:create_ui()
             UIListLayout_Opts.SortOrder = Enum.SortOrder.LayoutOrder
             UIListLayout_Opts.Parent = Options
 
-            -- Apply Theme.Toggle live when it changes
             local function applyToggleColour()
                 if ModuleManager._state then
                     Toggle.BackgroundColor3 = Theme.Toggle
@@ -1251,6 +1282,9 @@ function Library:create_ui()
             end
             ModuleManager._applyToggleColour = applyToggleColour
 
+            -- ═══════════════════════════════════════════════════════
+            --  change_state — ALWAYS writes full config
+            -- ═══════════════════════════════════════════════════════
             function ModuleManager:change_state(state)
                 self._state = state
 
@@ -1278,6 +1312,7 @@ function Library:create_ui()
                     }):Play()
                 end
 
+                -- Always write full config to disk
                 Library._config._flags[settings.flag] = self._state
                 if settings.callback then settings.callback(self._state) end
                 Config:save(game.GameId, Library._config)
@@ -1533,6 +1568,7 @@ function Library:create_ui()
                             BackgroundColor3 = Theme.Toggle
                         }):Play()
                     end
+                    -- Always rewrite full config
                     Library._config._flags[s.flag] = self._state
                     if s.callback then s.callback(self._state) end
                     Config:save(game.GameId, Library._config)
@@ -1762,6 +1798,7 @@ function Library:create_ui()
                             end
                         end
                         cancel_choose()
+                        Config:save(game.GameId, Library._config)
                     end)
                 end)
 
@@ -2508,7 +2545,6 @@ function Library:create_ui()
             UIStroke.Color = color
         end
 
-        -- Live toggle recolour: reflect Theme.Toggle instantly
         if key == "Toggle" then
             for _, entry in ipairs(Library._moduleLive) do
                 if entry.module._state then
@@ -3214,9 +3250,7 @@ function Library:create_ui()
                 Library._config._flags['Background_Image_Id'] = source
             end)
 
-            -- ═══════════════════════════════════════════════════════
-            --  Background Preset Save/Delete UI
-            -- ═══════════════════════════════════════════════════════
+            -- Preset save/delete UI
             local PresetNameHolder = Instance.new('Frame')
             PresetNameHolder.Name = 'PresetNameHolder'
             PresetNameHolder.Size = UDim2.fromOffset(207, 26)
@@ -3257,7 +3291,6 @@ function Library:create_ui()
             PresetNameStroke.Parent = PresetNameInput
             table.insert(self._elements, {obj = PresetNameStroke, prop = "Color", tKey = "GroupStroke"})
 
-            -- Save Preset Button
             local SavePresetHolder = Instance.new('Frame')
             SavePresetHolder.Name = 'SavePresetHolder'
             SavePresetHolder.Size = UDim2.fromOffset(207, 25)
@@ -3311,7 +3344,6 @@ function Library:create_ui()
                 Library.SendNotification({title = 'Preset', text = 'Saved "'..name..'".', duration = 3})
             end)
 
-            -- Delete Preset Button
             local DeletePresetHolder = Instance.new('Frame')
             DeletePresetHolder.Name = 'DeletePresetHolder'
             DeletePresetHolder.Size = UDim2.fromOffset(207, 25)
@@ -3418,10 +3450,7 @@ function Library:create_ui()
             callback = function(state) end,
         })
 
-        -- ═══════════════════════════════════════════════════════
-        --  Minimize Keybind — GATED on module state
-        --  When module is OFF, the minimize keybind does NOT work.
-        -- ═══════════════════════════════════════════════════════
+        -- Minimize Keybind — gated on module state
         local min_kb_module = InterfaceTab:create_module({
             title = 'Minimize Keybind',
             flag = 'UI_Minimize_Key',
@@ -3648,10 +3677,7 @@ function Library:create_ui()
             end,
         })
 
-        -- ══════════════════════════════════════════════════════
-        --  Keybinds List — IceLib dark style
-        --  Dark, simple, clean. Rebuilds only on signature change.
-        -- ══════════════════════════════════════════════════════
+        -- Keybinds List — IceLib dark style
         local KeybindOverlayGui = Instance.new("ScreenGui")
         KeybindOverlayGui.Name = Library._clientName.."Keybinds"
         KeybindOverlayGui.ResetOnSpawn = false
@@ -3917,15 +3943,11 @@ function Library:create_ui()
         getgenv()._Xinve_Cleanup = nil
     end)
 
-    -- ═══════════════════════════════════════════════════════════
-    --  Minimize keybind handler — GATED on module state
-    --  Only works when 'UI_Minimize_Key' module is ON.
-    -- ═══════════════════════════════════════════════════════════
+    -- Minimize keybind handler — gated on module state
     Connections['library_visiblity'] = UserInputService.InputBegan:Connect(function(input, process)
         if process then return end
         if Library._choosing_keybind then return end
 
-        -- GATE: only allow if the minimize module is enabled
         if not Library._config._flags['UI_Minimize_Key'] then return end
 
         local custom = Library._config._keybinds['Minimize_Keybind']
