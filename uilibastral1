@@ -1,17 +1,7 @@
 -- ═══════════════════════════════════════════════════════════════
---  Astral UI — merged lib (Fixed Build v3)
+--  Astral UI — merged lib (Fixed Build v4)
 --  Base: Fallen
 --  Overlays: IceLib (FPS/Ping) + IceLib-style Keybind List
---
---  Fixes in this build:
---   * Central ApplyTheme() — every appearance change updates live
---   * Minimize/unminimize NEVER touches theme elements
---   * Custom logo preserved across minimize (cached resolve)
---   * Live recolour for: toggles, checkboxes, keybind boxes, inputs,
---     buttons, dividers, strokes, gradients, tab gradients
---   * Config rewrites fully on every change
---   * Background presets save/delete from UI
---   * Minimize keybind gated on module state
 -- ═══════════════════════════════════════════════════════════════
 
 local UserInputService = cloneref and cloneref(game:GetService('UserInputService')) or game:GetService('UserInputService')
@@ -207,8 +197,10 @@ local Library = {
     -- UI references for live update
     _refs = {},
 
-    -- Live update registries
-    _liveUpdaters = {},  -- list of functions called on SetColor
+    -- Live update registries (initialized so table.insert never fails)
+    _moduleLive   = {},
+    _checkboxLive = {},
+    _liveUpdaters = {},
 }
 Library.__index = Library
 Library.Connections = Connections
@@ -281,6 +273,11 @@ function Library.new(opts)
     Library._resolvedLogo = resolve_image(logo, NAMESPACE..'/Icons')
     Library._config = Config:load(game.GameId, { _flags = {}, _keybinds = {} })
     Library.LoadBackgroundPresets()
+
+    -- Reset per-instance registries
+    Library._moduleLive   = {}
+    Library._checkboxLive = {}
+    Library._liveUpdaters = {}
 
     local self = setmetatable({ _tab = 0 }, Library)
     self:create_ui()
@@ -444,15 +441,13 @@ function Library:rgbToHex(color)
 end
 
 -- ═══════════════════════════════════════════════════════════════
---  ApplyTheme — the master live-update function
---  Called whenever a colour changes. Reapplies EVERYTHING
---  from Theme so all elements reflect the new colours instantly.
+--  ApplyTheme — master live-update
 -- ═══════════════════════════════════════════════════════════════
 function Library:ApplyTheme()
-    -- 1. Reapply every registered element
+    -- 1. Registered elements
     for _, element in ipairs(Library._elements) do
         if element.stateKey ~= nil then
-            -- skip — handled by module state callbacks
+            -- skip
         else
             pcall(function()
                 element.obj[element.prop] = Theme[element.tKey]
@@ -460,7 +455,7 @@ function Library:ApplyTheme()
         end
     end
 
-    -- 2. Container-level items (not in _elements)
+    -- 2. Container-level
     local refs = Library._refs
     if refs.ContainerGradient then
         refs.ContainerGradient.Color = Theme.Gradient
@@ -472,7 +467,7 @@ function Library:ApplyTheme()
         refs.UIStroke.Color = Theme.GroupStroke
     end
 
-    -- 3. Live toggles (module toggle + knob)
+    -- 3. Module toggles
     for _, entry in ipairs(Library._moduleLive) do
         local m = entry.module
         if m and m._state then
@@ -484,18 +479,17 @@ function Library:ApplyTheme()
         end
     end
 
-    -- 4. Live checkboxes
-    for _, entry in ipairs(Library._checkboxLive or {}) do
-        if entry.state then
-            if entry.fill then entry.fill.BackgroundColor3 = Theme.Toggle end
-            if entry.box then entry.box.BackgroundColor3 = Theme.Control end
-        else
-            if entry.fill then entry.fill.BackgroundColor3 = Theme.Toggle end
-            if entry.box then entry.box.BackgroundColor3 = Theme.Control end
+    -- 4. Checkboxes
+    for _, entry in ipairs(Library._checkboxLive) do
+        if entry.box then
+            entry.box.BackgroundColor3 = Theme.Control
+        end
+        if entry.fill then
+            entry.fill.BackgroundColor3 = Theme.Toggle
         end
     end
 
-    -- 5. Custom per-element live updaters (registered by features)
+    -- 5. Custom live updaters
     for _, fn in ipairs(Library._liveUpdaters) do
         pcall(fn, Theme)
     end
@@ -770,7 +764,6 @@ function Library:create_ui()
     self._container = Container
     self._background = Background
 
-    -- Store refs for ApplyTheme
     Library._refs = {
         ContainerGradient = ContainerGradient,
         SideGradient = SideGradient,
@@ -815,15 +808,9 @@ function Library:create_ui()
         Connections:disconnect_all()
     end)
 
-    -- ═══════════════════════════════════════════════════════════
-    --  change_visiblity — DOES NOT TOUCH THEME
-    --  Only modifies Size (and logo/client positions which are
-    --  layout, not theme). Theme is fully handled by ApplyTheme.
-    -- ═══════════════════════════════════════════════════════════
     function self:change_visiblity(state)
         Library._ui_open = state
         ShadowHolder.Visible = state
-
         if state then
             Logo.Position = UDim2.new(0, 14, 0, 26)
             ClientName.Position = UDim2.new(0, 43, 0, 26)
@@ -1321,7 +1308,6 @@ function Library:create_ui()
                     }):Play()
                 end
 
-                -- Update toggle visuals directly (not via tween, ApplyTheme handles colours)
                 if self._state then
                     Toggle.BackgroundColor3 = Theme.Toggle
                     Circle.BackgroundColor3 = Theme.Group
@@ -1465,9 +1451,6 @@ function Library:create_ui()
                 ModuleManager:change_state(not ModuleManager._state)
             end)
 
-            -- ═══════════════════════════════════════════════════
-            --  create_checkbox — live recolour registered
-            -- ═══════════════════════════════════════════════════
             function ModuleManager:create_checkbox(s)
                 LayoutOrderModule = LayoutOrderModule + 1
                 local CheckboxManager = { _state = false }
@@ -1571,8 +1554,6 @@ function Library:create_ui()
                 FillCorner.CornerRadius = UDim.new(0, 3)
                 FillCorner.Parent = Fill
 
-                -- Register in checkbox live list (for state-based recolour)
-                Library._checkboxLive = Library._checkboxLive or {}
                 table.insert(Library._checkboxLive, {
                     fill = Fill, box = Box, state = false
                 })
@@ -2640,7 +2621,6 @@ function Library:create_ui()
             Reset.MouseButton1Click:Connect(on_click)
         end
 
-        -- Configurations
         local config_module = InterfaceTab:create_module({
             title = 'Configurations',
             flag = 'UI_Config_System',
@@ -2783,7 +2763,6 @@ function Library:create_ui()
             end
         })
 
-        -- Appearance
         local color_module = InterfaceTab:create_module({
             title = 'Appearance',
             flag = 'Gui_Colors',
@@ -3123,7 +3102,6 @@ function Library:create_ui()
             end
         end
 
-        -- Background
         local image_module = InterfaceTab:create_module({
             title = 'Background',
             flag = 'Background_Image',
@@ -3242,7 +3220,6 @@ function Library:create_ui()
                 Library._config._flags['Background_Image_Id'] = source
             end)
 
-            -- Preset save/delete UI
             local PresetNameHolder = Instance.new('Frame')
             PresetNameHolder.Name = 'PresetNameHolder'
             PresetNameHolder.Size = UDim2.fromOffset(207, 26)
@@ -3404,7 +3381,6 @@ function Library:create_ui()
         set_background_image(Background_Image_Id)
         set_module_transparency((Library._config._flags['Background_Module_Transparency'] or 0) / 100)
 
-        -- UI Transparency
         local ui_trans_module = InterfaceTab:create_module({
             title = 'UI Transparency',
             flag = 'UI_Transparency_Module',
@@ -3427,7 +3403,6 @@ function Library:create_ui()
             end,
         })
 
-        -- Settings
         local settings_module = InterfaceTab:create_module({
             title = 'Settings',
             flag = 'UI_Settings',
@@ -3442,7 +3417,6 @@ function Library:create_ui()
             callback = function(state) end,
         })
 
-        -- Minimize Keybind — gated on module state
         local min_kb_module = InterfaceTab:create_module({
             title = 'Minimize Keybind',
             flag = 'UI_Minimize_Key',
@@ -3456,7 +3430,6 @@ function Library:create_ui()
             flag = 'Minimize_Keybind',
         })
 
-        -- Notifications
         local notif_module = InterfaceTab:create_module({
             title = 'Notifications',
             flag = 'UI_Notifications',
@@ -3490,7 +3463,6 @@ function Library:create_ui()
             end,
         })
 
-        -- Overlays
         local StatsOverlayState = {samples={}, maxSamples=24, ping=0, fps=0}
 
         local OverlayGui = Instance.new("ScreenGui")
@@ -3669,7 +3641,6 @@ function Library:create_ui()
             end,
         })
 
-        -- Keybinds List — IceLib dark style
         local KeybindOverlayGui = Instance.new("ScreenGui")
         KeybindOverlayGui.Name = Library._clientName.."Keybinds"
         KeybindOverlayGui.ResetOnSpawn = false
@@ -3874,7 +3845,6 @@ function Library:create_ui()
         end
     end
 
-    -- Unload
     local UnloadBtn = Instance.new('TextButton')
     UnloadBtn.Name = 'UnloadBtn'
     UnloadBtn.Text = 'Unload'
