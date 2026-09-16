@@ -834,11 +834,12 @@ function Library:create_ui()
     function self:change_visiblity(state)
         Library._ui_open = state
         ShadowHolder.Visible = state
+        local full = Library._full_size or UDim2.fromOffset(752, 479)
         if state then
             Logo.Position = UDim2.new(0, 14, 0, 26)
             ClientName.Position = UDim2.new(0, 43, 0, 26)
             TweenService:Create(Container, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
-                Size = UDim2.fromOffset(752, 479)
+                Size = full
             }):Play()
         else
             Logo.Position = UDim2.new(0, 10, 0, 26)
@@ -871,29 +872,69 @@ function Library:create_ui()
 function self:load()
     self:get_device()
 
-    -- Always apply scaling based on viewport, regardless of device
+    -- Compute the maximum container size that fits the current viewport
+    local function get_container_size()
+        local viewport = Workspace.CurrentCamera.ViewportSize
+        -- leave margin so it doesn't touch edges
+        local max_w = viewport.X - 40
+        local max_h = viewport.Y - 40
+        -- desired size
+        local want_w, want_h = 752, 479
+        -- clamp down if viewport is smaller
+        local w = math.min(want_w, max_w)
+        local h = math.min(want_h, max_h)
+        return w, h
+    end
+
+    -- Compute scale based on viewport, but ALSO based on how much we had to shrink
     local function apply_viewport_scale()
         local viewport = Workspace.CurrentCamera.ViewportSize
-        local scale_x = viewport.X / 1400
-        local scale_y = viewport.Y / 900
-        local scale = math.min(scale_x, scale_y)
-        -- clamp so it never gets absurdly small or bigger than 1
-        scale = math.clamp(scale, 0.65, 1)
+        local max_w = viewport.X - 40
+        local max_h = viewport.Y - 40
+
+        -- Scale to fit if viewport is smaller than the base UI
+        local scale_x = math.min(1, max_w / 752)
+        local scale_y = math.min(1, max_h / 479)
+        local scale = math.clamp(math.min(scale_x, scale_y), 0.55, 1)
+
         UIScale.Scale = scale
         if ShadowScale then
             ShadowScale.Scale = scale
         end
+
+        Library._ui_scale = scale
+        Library._viewport_size = Vector2.new(max_w / scale, max_h / scale)
     end
 
     apply_viewport_scale()
 
-    Connections['ui_scale'] = Workspace.CurrentCamera:GetPropertyChangedSignal('ViewportSize'):Connect(apply_viewport_scale)
+    Connections['ui_scale'] = Workspace.CurrentCamera:GetPropertyChangedSignal('ViewportSize'):Connect(function()
+        apply_viewport_scale()
+        -- Resize container to match
+        local w, h = get_container_size()
+        local scale = Library._ui_scale
+        Container.Size = UDim2.fromOffset(w / scale, h / scale)
+
+        -- Resize section scrolling frames to fit container
+        for _, section in Sections:GetChildren() do
+            if section.Name == 'LeftSection' or section.Name == 'RightSection' then
+                section.Size = UDim2.new(0, 243, 0, (h / scale) - 124)
+            end
+        end
+    end)
 
     ShadowHolder.Visible = true
 
+    -- Initial size + animation
+    local w, h = get_container_size()
+    local scale = Library._ui_scale
+    Container.Size = UDim2.fromOffset(0, 0)
     TweenService:Create(Container, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
-        Size = UDim2.fromOffset(752, 479)
+        Size = UDim2.fromOffset(w / scale, h / scale)
     }):Play()
+
+    -- Store target size for unminimize
+    Library._full_size = UDim2.fromOffset(w / scale, h / scale)
 end
 
     function self:update_tabs(tab)
