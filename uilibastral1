@@ -1,7 +1,18 @@
 -- ═══════════════════════════════════════════════════════════════
---  Astral UI — merged lib (Fixed Build v4)
+--  Astral UI — merged lib (Fixed Build v6)
 --  Base: Fallen
 --  Overlays: IceLib (FPS/Ping) + IceLib-style Keybind List
+--
+--  Fixes in this build:
+--   * Animated module toggles (tweens restored)
+--   * ApplyTheme gated to only recolor relevant elements
+--   * Minimize does not reset theme
+--   * Custom logo preserved across minimize
+--   * Config rewrites fully on every change
+--   * Background color drives gradient (live)
+--   * Background presets save/delete from UI
+--   * Minimize keybind gated on module state
+--   * Profiles snapshot + restore theme colors
 -- ═══════════════════════════════════════════════════════════════
 
 local UserInputService = cloneref and cloneref(game:GetService('UserInputService')) or game:GetService('UserInputService')
@@ -194,13 +205,13 @@ local Library = {
     _backgroundPresets = {},
     _presetOptions = { 'None' },
 
-    -- UI references for live update
     _refs = {},
 
-    -- Live update registries (initialized so table.insert never fails)
     _moduleLive   = {},
     _checkboxLive = {},
     _liveUpdaters = {},
+
+    _lastColorKey = nil,
 }
 Library.__index = Library
 Library.Connections = Connections
@@ -274,7 +285,6 @@ function Library.new(opts)
     Library._config = Config:load(game.GameId, { _flags = {}, _keybinds = {} })
     Library.LoadBackgroundPresets()
 
-    -- Reset per-instance registries
     Library._moduleLive   = {}
     Library._checkboxLive = {}
     Library._liveUpdaters = {}
@@ -441,64 +451,64 @@ function Library:rgbToHex(color)
 end
 
 -- ═══════════════════════════════════════════════════════════════
---  ApplyTheme — master live-update
+--  ApplyTheme — gated live update (only touches relevant elements)
 -- ═══════════════════════════════════════════════════════════════
 function Library:ApplyTheme()
-    -- 1. Registered elements
+    local key = Library._lastColorKey
+
+    -- 1. Registered elements matching the changed key (or all if no key tracked)
     for _, element in ipairs(Library._elements) do
         if element.stateKey ~= nil then
             -- skip
-        else
+        elseif key == nil or element.tKey == key then
             pcall(function()
                 element.obj[element.prop] = Theme[element.tKey]
             end)
         end
     end
 
-    -- 2. Container-level
+    -- 2. Container-level items
     local refs = Library._refs
-    if refs.ContainerGradient then
-        refs.ContainerGradient.Color = Theme.Gradient
+    if key == nil or key == "Background" then
+        if refs.ContainerGradient then refs.ContainerGradient.Color = Theme.Gradient end
+        if refs.SideGradient then refs.SideGradient.Color = Theme.Gradient end
     end
-    if refs.SideGradient then
-        refs.SideGradient.Color = Theme.Gradient
-    end
-    if refs.UIStroke then
-        refs.UIStroke.Color = Theme.GroupStroke
+    if key == nil or key == "GroupStroke" then
+        if refs.UIStroke then refs.UIStroke.Color = Theme.GroupStroke end
     end
 
-    -- 3. Module toggles
-    for _, entry in ipairs(Library._moduleLive) do
-        local m = entry.module
-        if m and m._state then
-            if entry.toggle then entry.toggle.BackgroundColor3 = Theme.Toggle end
-            if entry.knob then entry.knob.BackgroundColor3 = Theme.Group end
-        else
-            if entry.toggle then entry.toggle.BackgroundColor3 = Theme.Control end
-            if entry.knob then entry.knob.BackgroundColor3 = Theme.TextDim end
+    -- 3. Module toggles — only when relevant keys change
+    if key == nil or key == "Toggle" or key == "Control" or key == "TextDim" or key == "Group" then
+        for _, entry in ipairs(Library._moduleLive) do
+            local m = entry.module
+            if m and m._state then
+                if entry.toggle then entry.toggle.BackgroundColor3 = Theme.Toggle end
+                if entry.knob then entry.knob.BackgroundColor3 = Theme.Group end
+            else
+                if entry.toggle then entry.toggle.BackgroundColor3 = Theme.Control end
+                if entry.knob then entry.knob.BackgroundColor3 = Theme.TextDim end
+            end
         end
     end
 
-    -- 4. Checkboxes
-    for _, entry in ipairs(Library._checkboxLive) do
-        if entry.box then
-            entry.box.BackgroundColor3 = Theme.Control
-        end
-        if entry.fill then
-            entry.fill.BackgroundColor3 = Theme.Toggle
+    -- 4. Checkboxes — only when relevant keys change
+    if key == nil or key == "Toggle" or key == "Control" then
+        for _, entry in ipairs(Library._checkboxLive or {}) do
+            if entry.box then entry.box.BackgroundColor3 = Theme.Control end
+            if entry.fill then entry.fill.BackgroundColor3 = Theme.Toggle end
         end
     end
 
     -- 5. Custom live updaters
-    for _, fn in ipairs(Library._liveUpdaters) do
-        pcall(fn, Theme)
+    for _, fn in ipairs(Library._liveUpdaters or {}) do
+        pcall(fn, Theme, key)
     end
 end
 
 function Library:SetColor(key, color)
     Theme[key] = color
 
-    -- Special handling: Background drives the container Gradient
+    -- Background drives the container gradient
     if key == "Background" then
         Theme.Gradient = ColorSequence.new{
             ColorSequenceKeypoint.new(0.00, color:Lerp(Color3.fromRGB(255,255,255), 0.35)),
@@ -507,7 +517,10 @@ function Library:SetColor(key, color)
         }
     end
 
+    Library._lastColorKey = key
     Library:ApplyTheme()
+    Library._lastColorKey = nil
+
     Library._config._flags['Theme_'..key] = self:rgbToHex(color)
     Config:save(game.GameId, Library._config)
 end
@@ -1305,6 +1318,9 @@ function Library:create_ui()
             UIListLayout_Opts.SortOrder = Enum.SortOrder.LayoutOrder
             UIListLayout_Opts.Parent = Options
 
+            -- ═══════════════════════════════════════════════════════
+            --  change_state — ANIMATED
+            -- ═══════════════════════════════════════════════════════
             function ModuleManager:change_state(state)
                 self._state = state
 
@@ -1312,20 +1328,24 @@ function Library:create_ui()
                     TweenService:Create(Module, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
                         Size = UDim2.fromOffset(241, 93 + self._size + self._multiplier)
                     }):Play()
+                    TweenService:Create(Toggle, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+                        BackgroundColor3 = Theme.Toggle
+                    }):Play()
+                    TweenService:Create(Circle, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+                        BackgroundColor3 = Theme.Group,
+                        Position = UDim2.new(1, -14, 0.5, 0)
+                    }):Play()
                 else
                     TweenService:Create(Module, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
                         Size = UDim2.fromOffset(241, 93)
                     }):Play()
-                end
-
-                if self._state then
-                    Toggle.BackgroundColor3 = Theme.Toggle
-                    Circle.BackgroundColor3 = Theme.Group
-                    Circle.Position = UDim2.new(1, -14, 0.5, 0)
-                else
-                    Toggle.BackgroundColor3 = Theme.Control
-                    Circle.BackgroundColor3 = Theme.TextDim
-                    Circle.Position = UDim2.new(0, 2, 0.5, 0)
+                    TweenService:Create(Toggle, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+                        BackgroundColor3 = Theme.Control
+                    }):Play()
+                    TweenService:Create(Circle, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+                        BackgroundColor3 = Theme.TextDim,
+                        Position = UDim2.new(0, 2, 0.5, 0)
+                    }):Play()
                 end
 
                 Library._config._flags[settings.flag] = self._state
@@ -1564,6 +1584,7 @@ function Library:create_ui()
                 FillCorner.CornerRadius = UDim.new(0, 3)
                 FillCorner.Parent = Fill
 
+                Library._checkboxLive = Library._checkboxLive or {}
                 table.insert(Library._checkboxLive, {
                     fill = Fill, box = Box, state = false
                 })
@@ -2701,11 +2722,14 @@ function Library:create_ui()
                 end
             end
 
-            for key, default in pairs(DefaultTheme) do
+            -- Restore theme from the loaded profile
+            for k, default in pairs(DefaultTheme) do
                 if typeof(default) == "Color3" then
-                    local saved = Library._config._flags['Theme_'..key]
+                    local saved = Library._config._flags['Theme_'..k]
                     if saved then
-                        Library:SetColor(key, Library:hexToRGB(saved))
+                        Library:SetColor(k, Library:hexToRGB(saved))
+                    else
+                        Library:SetColor(k, default)
                     end
                 end
             end
@@ -2735,6 +2759,14 @@ function Library:create_ui()
                     return
                 end
                 if not isfolder(NAMESPACE..'/Configs') then makefolder(NAMESPACE..'/Configs') end
+
+                -- Snapshot current theme into flags before saving
+                for k, v in pairs(Theme) do
+                    if typeof(v) == "Color3" then
+                        Library._config._flags['Theme_'..k] = Library:rgbToHex(v)
+                    end
+                end
+
                 Library._config._flags['Config_Input_Name'] = name
                 Config:save('Configs/'..name, Library._config)
                 config_dropdown:refresh(get_configs())
