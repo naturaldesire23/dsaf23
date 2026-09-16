@@ -868,30 +868,33 @@ function Library:create_ui()
         end
     end
 
-    function self:load()
-        self:get_device()
+function self:load()
+    self:get_device()
 
-        if self._device == 'Mobile' or self._device == 'Unknown' then
-            self:get_screen_scale()
-            UIScale.Scale = self._ui_scale
-            if ShadowScale then
-                ShadowScale.Scale = self._ui_scale
-            end
-            Connections['ui_scale'] = Workspace.CurrentCamera:GetPropertyChangedSignal('ViewportSize'):Connect(function()
-                self:get_screen_scale()
-                UIScale.Scale = self._ui_scale
-                if ShadowScale then
-                    ShadowScale.Scale = self._ui_scale
-                end
-            end)
+    -- Always apply scaling based on viewport, regardless of device
+    local function apply_viewport_scale()
+        local viewport = Workspace.CurrentCamera.ViewportSize
+        local scale_x = viewport.X / 1400
+        local scale_y = viewport.Y / 900
+        local scale = math.min(scale_x, scale_y)
+        -- clamp so it never gets absurdly small or bigger than 1
+        scale = math.clamp(scale, 0.65, 1)
+        UIScale.Scale = scale
+        if ShadowScale then
+            ShadowScale.Scale = scale
         end
-
-        ShadowHolder.Visible = true
-
-        TweenService:Create(Container, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
-            Size = UDim2.fromOffset(752, 479)
-        }):Play()
     end
+
+    apply_viewport_scale()
+
+    Connections['ui_scale'] = Workspace.CurrentCamera:GetPropertyChangedSignal('ViewportSize'):Connect(apply_viewport_scale)
+
+    ShadowHolder.Visible = true
+
+    TweenService:Create(Container, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+        Size = UDim2.fromOffset(752, 479)
+    }):Play()
+end
 
     function self:update_tabs(tab)
         for index, object in Tabs:GetChildren() do
