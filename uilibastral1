@@ -2012,6 +2012,8 @@ end
                 table.insert(Library._elements, {obj = Value, prop = "TextColor3", tKey = "Text"})
 
                 function SliderManager:set_percentage(percentage)
+                    -- ═══ GUARD AGAINST NIL ═══
+                    percentage = tonumber(percentage) or tonumber(s.value) or tonumber(s.minimum_value) or 0
                     local rounded_number = 0
                     if s.round_number then
                         rounded_number = math.floor(percentage)
